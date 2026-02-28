@@ -1,0 +1,173 @@
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <memory>
+#include <mutex>
+#include <chrono>
+#include <ctime>
+
+using namespace std;
+
+//////////////////////////////////////////////////////////////
+// 1. Log Levels (Enum)
+//////////////////////////////////////////////////////////////
+
+enum class LogLevel {
+    DEBUG = 1,
+    INFO = 2,
+    ERROR = 3
+};
+
+//////////////////////////////////////////////////////////////
+// 2. Immutable Log Message
+//////////////////////////////////////////////////////////////
+
+class LogMessage {
+private:
+    const LogLevel level;
+    const string message;
+    const long long timestamp;
+
+public:
+    LogMessage(LogLevel lvl, const string& msg)
+        : level(lvl), message(msg),
+          timestamp(chrono::system_clock::now().time_since_epoch().count()) {}
+
+    LogLevel getLevel() const { return level; }
+    const string& getMessage() const { return message; }
+    long long getTimestamp() const { return timestamp; }
+};
+
+//////////////////////////////////////////////////////////////
+// 3. Formatter Strategy
+//////////////////////////////////////////////////////////////
+
+class LogFormatter {
+public:
+    virtual string format(const LogMessage& log) = 0;
+    virtual ~LogFormatter() = default;
+};
+
+class SimpleFormatter : public LogFormatter {
+public:
+    string format(const LogMessage& log) override {
+        return "[" + to_string((int)log.getLevel()) + "] "
+               + to_string(log.getTimestamp()) + " : "
+               + log.getMessage();
+    }
+};
+
+//////////////////////////////////////////////////////////////
+// 4. Sink (Output Destination)
+//////////////////////////////////////////////////////////////
+
+class LogSink {
+public:
+    virtual void write(const string& formattedMsg) = 0;
+    virtual ~LogSink() = default;
+};
+
+class ConsoleSink : public LogSink {
+public:
+    void write(const string& msg) override {
+        cout << msg << endl;
+    }
+};
+
+class FileSink : public LogSink {
+private:
+    ofstream file;
+
+public:
+    FileSink(const string& filename) {
+        file.open(filename, ios::app);
+    }
+
+    void write(const string& msg) override {
+        file << msg << endl;
+    }
+
+    ~FileSink() {
+        if (file.is_open()) file.close();
+    }
+};
+
+//////////////////////////////////////////////////////////////
+// 5. Thread-Safe Singleton Logger
+//////////////////////////////////////////////////////////////
+
+class Logger {
+private:
+    unique_ptr<LogFormatter> formatter;
+    unique_ptr<LogSink> sink;
+    mutex mtx;
+
+    // Private constructor
+    Logger() {
+        formatter = make_unique<SimpleFormatter>();
+        sink = make_unique<ConsoleSink>();
+    }
+
+public:
+    // Delete copy operations
+    Logger(const Logger&) = delete;
+    Logger& operator=(const Logger&) = delete;
+
+    // Singleton instance
+    static Logger& getInstance() {
+        static Logger instance; // thread-safe (C++11)
+        return instance;
+    }
+
+    //////////////////////////////////////////////////////////
+    // Configuration
+    //////////////////////////////////////////////////////////
+
+    void setFormatter(unique_ptr<LogFormatter> fmt) {
+        lock_guard<mutex> lock(mtx);
+        formatter = move(fmt);
+    }
+
+    void setSink(unique_ptr<LogSink> sk) {
+        lock_guard<mutex> lock(mtx);
+        sink = move(sk);
+    }
+
+    //////////////////////////////////////////////////////////
+    // Logging
+    //////////////////////////////////////////////////////////
+
+    void log(LogLevel level, const string& msg) {
+        LogMessage logMsg(level, msg);
+
+        lock_guard<mutex> lock(mtx);
+
+        string formatted = formatter->format(logMsg);
+        sink->write(formatted);
+    }
+
+    void debug(const string& msg) { log(LogLevel::DEBUG, msg); }
+    void info(const string& msg)  { log(LogLevel::INFO, msg); }
+    void error(const string& msg) { log(LogLevel::ERROR, msg); }
+};
+
+//////////////////////////////////////////////////////////////
+// 6. Client Code
+//////////////////////////////////////////////////////////////
+
+int main() {
+
+    // Get singleton instance
+    Logger& logger = Logger::getInstance();
+
+    logger.info("Application started");
+    logger.debug("Debugging mode ON");
+    logger.error("Something failed");
+
+    // Change output to file
+    logger.setSink(make_unique<FileSink>("logs.txt"));
+
+    logger.info("Now logging to file");
+
+    return 0;
+}
