@@ -1,0 +1,223 @@
+#include <iostream>
+#include <string>
+#include <vector>
+#include <unordered_map>
+#include <memory>
+#include <mutex>
+#include <algorithm>
+#include <chrono>
+#include <thread>
+
+using namespace std;
+
+// ─────────────────────────────────────────────
+// Message
+// ─────────────────────────────────────────────
+class Message {
+private:
+    string topicName;
+    string payload;
+    long long timestamp;
+
+public:
+    Message(const string& topic, const string& payload)
+        : topicName(topic), payload(payload)
+    {
+        timestamp = chrono::duration_cast<chrono::milliseconds>(
+            chrono::system_clock::now().time_since_epoch()).count();
+    }
+
+    string getTopicName() const { return topicName; }
+    string getPayload() const { return payload; }
+    long long getTimestamp() const { return timestamp; }
+};
+
+// ─────────────────────────────────────────────
+// Subscriber Interface
+// ─────────────────────────────────────────────
+class Subscriber {
+public:
+    virtual void onMessage(const Message& message) = 0;
+    virtual ~Subscriber() {}
+};
+
+// ─────────────────────────────────────────────
+// Topic
+// ─────────────────────────────────────────────
+class Topic {
+private:
+    string name;
+    vector<Subscriber*> subscribers;
+    mutex mtx;
+
+public:
+    Topic(const string& name) : name(name) {}
+
+    void subscribe(Subscriber* sub) {
+        lock_guard<mutex> lock(mtx);
+
+        if(find(subscribers.begin(), subscribers.end(), sub) == subscribers.end()) {
+            subscribers.push_back(sub);
+            cout << "[Topic:" << name << "] Subscriber added\n";
+        }
+    }
+
+    void unsubscribe(Subscriber* sub) {
+        lock_guard<mutex> lock(mtx);
+
+        subscribers.erase(
+            remove(subscribers.begin(), subscribers.end(), sub),
+            subscribers.end()
+        );
+    }
+
+    void notifySubscribers(const Message& message) {
+        vector<Subscriber*> snapshot;
+
+        {
+            lock_guard<mutex> lock(mtx);
+            snapshot = subscribers;
+        }
+
+        for(auto sub : snapshot) {
+            try {
+                sub->onMessage(message);
+            } catch (...) {
+                cerr << "Subscriber error\n";
+            }
+        }
+    }
+};
+
+// ─────────────────────────────────────────────
+// MessageBroker (Singleton)
+// ─────────────────────────────────────────────
+class MessageBroker {
+private:
+    unordered_map<string, shared_ptr<Topic>> topics;
+    mutex mtx;
+
+    MessageBroker() {}
+
+public:
+    static MessageBroker& getInstance() {
+        static MessageBroker instance;
+        return instance;
+    }
+
+    shared_ptr<Topic> createTopic(const string& name) {
+        lock_guard<mutex> lock(mtx);
+
+        if(topics.find(name) == topics.end()) {
+            topics[name] = make_shared<Topic>(name);
+            cout << "[Broker] Topic created: " << name << endl;
+        }
+
+        return topics[name];
+    }
+
+    void subscribe(const string& topicName, Subscriber* sub) {
+        topics[topicName]->subscribe(sub);
+    }
+
+    void unsubscribe(const string& topicName, Subscriber* sub) {
+        topics[topicName]->unsubscribe(sub);
+    }
+
+    void publish(const string& topicName, const string& payload) {
+        Message message(topicName, payload);
+
+        cout << "[Broker] Publishing to " << topicName << ": " << payload << endl;
+
+        topics[topicName]->notifySubscribers(message);
+    }
+};
+
+// ─────────────────────────────────────────────
+// Publisher
+// ─────────────────────────────────────────────
+class Publisher {
+private:
+    string name;
+    MessageBroker& broker;
+
+public:
+    Publisher(const string& name)
+        : name(name), broker(MessageBroker::getInstance()) {}
+
+    void publish(const string& topic, const string& payload) {
+        cout << "[Publisher:" << name << "] Publishing...\n";
+        broker.publish(topic, payload);
+    }
+};
+
+// ─────────────────────────────────────────────
+// Concrete Subscriber
+// ─────────────────────────────────────────────
+class ConcreteSubscriber : public Subscriber {
+private:
+    string name;
+
+public:
+    ConcreteSubscriber(const string& name) : name(name) {}
+
+    void onMessage(const Message& message) override {
+        cout << name << " received -> "
+             << message.getPayload()
+             << " (topic: " << message.getTopicName() << ")\n";
+    }
+};
+
+// ─────────────────────────────────────────────
+// Demo
+// ─────────────────────────────────────────────
+int main() {
+
+    MessageBroker& broker = MessageBroker::getInstance();
+
+    // create topics
+    broker.createTopic("sports");
+    broker.createTopic("tech");
+
+    // create subscribers
+    ConcreteSubscriber alice("Alice");
+    ConcreteSubscriber bob("Bob");
+    ConcreteSubscriber carol("Carol");
+
+    // subscribe
+    broker.subscribe("sports", &alice);
+    broker.subscribe("sports", &bob);
+    broker.subscribe("tech", &bob);
+    broker.subscribe("tech", &carol);
+
+    // publishers
+    Publisher espn("ESPN");
+    Publisher techCrunch("TechCrunch");
+
+    espn.publish("sports", "Messi scores hat trick");
+    techCrunch.publish("tech", "GPT-5 announced");
+
+    cout << "\n--- Bob unsubscribes from sports ---\n";
+    broker.unsubscribe("sports", &bob);
+
+    espn.publish("sports", "Ronaldo retires");
+
+    // concurrency test
+    cout << "\n--- Concurrency test ---\n";
+    Publisher stress("StressTest");
+
+    vector<thread> threads;
+
+    for(int i=0;i<5;i++) {
+        threads.emplace_back([&,i](){
+            stress.publish("sports", "Concurrent message #" + to_string(i));
+        });
+    }
+
+    for(auto &t : threads)
+        t.join();
+
+    cout << "\nDone\n";
+
+    return 0;
+}
